@@ -12,6 +12,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
 import org.kframework.attributes.Att;
+import org.kframework.attributes.Location;
 import org.kframework.backend.java.compile.KOREtoBackendKIL;
 import org.kframework.backend.java.symbolic.JavaBackend;
 import org.kframework.backend.java.symbolic.Transformer;
@@ -205,19 +206,22 @@ public class Definition extends JavaSymbolicObject {
 
     public List<Rule> addKoreRules(Module module, KOREtoBackendKIL converter, @Nullable String filterAttribute,
                                    @Nullable UnaryOperator<Rule> rulePostProcessor) {
+//        System.err.println("module " + module.name() + "...");
         //Add regular rules from all modules
         List<Rule> result = stream(module.rules())
                 .filter(rule -> !containsAnyAttribute(rule, automatonAttributes))
                 .filter(rule -> filterAttribute == null || rule.att().contains(filterAttribute))
                 //Ensures that rule order in all collections remains the same across across different executions.
-                .sorted(Comparator.comparingInt(rule -> rule.body().hashCode()))
+                .sorted(Comparator.comparing(rule -> rule.location().map(Location::startLine).orElse(rule.body().hashCode())))
                 .map(rule -> addKoreRule(rule, converter, module, rulePostProcessor))
                 .collect(Collectors.toList());
 
+//        System.err.println("automaton...");
         //Add automaton from this module only
         stream(module.localRules())
                 .filter(rule -> containsAnyAttribute(rule, automatonAttributes))
                 .forEach(rule -> addKoreAutomaton(rule, converter, module));
+//        System.err.println("done.");
         return result;
     }
 
@@ -226,6 +230,7 @@ public class Definition extends JavaSymbolicObject {
      */
     public Rule addKoreRule(org.kframework.definition.Rule rule, KOREtoBackendKIL converter, Module module,
                             @Nullable UnaryOperator<Rule> rulePostProcessor) {
+//        System.err.println("add rule at " + rule.location());
         Rule convertedRule = converter.convert(module, rule);
         if (rulePostProcessor != null) {
             convertedRule = rulePostProcessor.apply(convertedRule);

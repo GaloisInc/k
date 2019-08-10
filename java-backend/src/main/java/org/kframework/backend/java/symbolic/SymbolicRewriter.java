@@ -1,16 +1,26 @@
 // Copyright (c) 2013-2019 K Team. All Rights Reserved.
 package org.kframework.backend.java.symbolic;
 
+import com.google.common.base.Enums;
 import com.google.common.base.Stopwatch;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import org.apache.commons.lang3.tuple.Pair;
 import org.kframework.RewriterResult;
 import org.kframework.Strategy;
 import org.kframework.attributes.Att;
+import org.kframework.backend.java.builtins.BitVector;
 import org.kframework.backend.java.builtins.BoolToken;
+import org.kframework.backend.java.builtins.FloatToken;
 import org.kframework.backend.java.builtins.FreshOperations;
+import org.kframework.backend.java.builtins.IntToken;
+import org.kframework.backend.java.builtins.StringToken;
+import org.kframework.backend.java.builtins.UninterpretedToken;
 import org.kframework.backend.java.compile.KOREtoBackendKIL;
 import org.kframework.backend.java.kil.BuiltinList;
 import org.kframework.backend.java.kil.ConstrainedTerm;
@@ -25,6 +35,7 @@ import org.kframework.backend.java.kil.Rule;
 import org.kframework.backend.java.kil.Sort;
 import org.kframework.backend.java.kil.Term;
 import org.kframework.backend.java.kil.TermContext;
+import org.kframework.backend.java.kil.Token;
 import org.kframework.backend.java.kil.Variable;
 import org.kframework.backend.java.util.FormulaContext;
 import org.kframework.backend.java.util.RuleSourceUtil;
@@ -43,9 +54,14 @@ import org.kframework.utils.errorsystem.KEMException;
 import org.kframework.utils.errorsystem.KExceptionManager;
 
 import javax.annotation.Nullable;
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
@@ -55,6 +71,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * @author AndreiS
@@ -172,6 +189,9 @@ public class SymbolicRewriter {
     public List<ConstrainedTerm> fastComputeRewriteStep(ConstrainedTerm subject, boolean computeOne, boolean narrowing,
                                                         boolean proofFlag, int step, ConstrainedTerm initTerm) {
         global.stateLog.log(StateLog.LogEvent.NODE, subject.term(), subject.constraint());
+        if (step > 20) {
+            System.err.println("step " + step + ": " + subject.term().getCellContentsByName("<k>").get(0));
+        }
         List<ConstrainedTerm> results = new ArrayList<>();
         if (definition.mainAutomaton() == null) {
             //If there are no regular rules, do nothing.
@@ -698,6 +718,7 @@ public class SymbolicRewriter {
                             }
                             successPaths++;
                             successResults.add(term);
+                            addLean(initialTerm, term);
                             continue;
                         } else if (boundaryPattern != null && step > 1) {
                             //If boundary cells in current term match boundary cells in target term but entire terms
@@ -714,26 +735,26 @@ public class SymbolicRewriter {
                     }
 
                     //Attempt to apply a spec rule, except on first step.
-                    if (step > 1) {
-                        ConstrainedTerm result = applySpecRules(term, step);
-                        if (result != null) {
-                            nextStepLogEnabled = true;
-                            logStep(step, v, term, true, alreadyLogged, initialTerm);
-                            // re-running constraint generation again for debug purposes
-                            if (global.javaExecutionOptions.logBasic) {
-                                System.err.println("\nApplying specification rule\n=========================\n");
-                            }
-                            if (visited.add(result)) {
-                                nextQueue.add(result);
-                            } else {
-                                if (term.equals(result)) {
-                                    throw KEMException.criticalError(
-                                            "Step " + step + ": infinite loop after applying a spec rule.");
-                                }
-                            }
-                            continue;
-                        }
-                    }
+//                    if (step > 1) {
+//                        ConstrainedTerm result = applySpecRules(term, step);
+//                        if (result != null) {
+//                            nextStepLogEnabled = true;
+//                            logStep(step, v, term, true, alreadyLogged, initialTerm);
+//                            // re-running constraint generation again for debug purposes
+//                            if (global.javaExecutionOptions.logBasic) {
+//                                System.err.println("\nApplying specification rule\n=========================\n");
+//                            }
+//                            if (visited.add(result)) {
+//                                nextQueue.add(result);
+//                            } else {
+//                                if (term.equals(result)) {
+//                                    throw KEMException.criticalError(
+//                                            "Step " + step + ": infinite loop after applying a spec rule.");
+//                                }
+//                            }
+//                            continue;
+//                        }
+//                    }
 
                     //Apply a regular rule
                     List<ConstrainedTerm> results = fastComputeRewriteStep(term, false, true, true, step,
@@ -810,6 +831,8 @@ public class SymbolicRewriter {
             global.javaExecutionOptions.log = originalLog;
         }
 
+        printLean();
+
         List<ConstrainedTerm> tweakedProofResults =
                 printFormattedFailuresAndGetTweakedResults(initialTerm, proofResults);
         printSuccessFinalStates(initialTerm, successResults);
@@ -818,6 +841,687 @@ public class SymbolicRewriter {
             printSummaryBox(rule, proofResults, successPaths, step, 0);
         }
         return tweakedProofResults;
+    }
+
+    private Multimap<String, LeanInstructionVariant> leanInstructionVariants = ArrayListMultimap.create();
+
+    private void addLean(ConstrainedTerm initial, ConstrainedTerm result) {
+        Variable registersVariable = (Variable) initial.term().getCellContentsByName("<regstate>").get(0);
+        Variable memoryVariable = (Variable) initial.term().getCellContentsByName("<leanmemory>").get(0);
+        KItem instruction = (KItem) ((KList) ((KItem) initial.term().getCellContentsByName("<k>").get(0)).kList()).get(0);
+        Variable opcodeVariable = (Variable) ((KList) instruction.kList()).get(0);
+        Variable operandListVariable = (Variable) ((KList) instruction.kList()).get(1);
+
+        assert result.constraint().substitution().size() == 2;
+        String opcodeLabel = ((KLabelConstant) ((KItem) result.constraint().substitution().get(opcodeVariable)).kLabel()).label();
+        List<Term> operands = new ArrayList<>();
+        Term operandList = result.constraint().substitution().get(operandListVariable);
+        while (!((KLabelConstant) ((KItem) operandList).klabel()).label().equals(".List{\"operandlist\"}")) {
+            assert ((KLabelConstant) ((KItem) operandList).klabel()).label().equals("operandlist");
+            assert ((KList) ((KItem) operandList).kList()).isConcreteCollection();
+            assert ((KList) ((KItem) operandList).kList()).concreteSize() == 2;
+            operands.add(((KList) ((KItem) operandList).kList()).get(0));
+            operandList = ((KList) ((KItem) operandList).kList()).get(1);
+        }
+
+        Term resultTerm = result.term().evaluate(result.termContext());
+        Term resultRegisters = resultTerm.getCellContentsByName("<regstate>").get(0);
+        Term resultMemory = resultTerm.getCellContentsByName("<leanmemory>").get(0);
+
+        LeanInstructionVariant variant = new LeanInstructionVariant(
+                initial.termContext(),
+                opcodeLabel.substring(0, opcodeLabel.length() - "_X86-SYNTAX".length()),
+                operands,
+                registersVariable,
+                memoryVariable,
+                resultRegisters,
+                resultMemory,
+                result.constraint().equalities());
+        leanInstructionVariants.put(variant.opcode, variant);
+    }
+
+    final public static Set<String> skipRegister = ImmutableSet.of(
+            "%al_X86-SYNTAX",
+            "%ax_X86-SYNTAX",
+            "%eax_X86-SYNTAX",
+            "%rax_X86-SYNTAX",
+            "%xmm0_X86-SYNTAX");
+
+    private void printLean() {
+        ImmutableSortedMap.copyOf(leanInstructionVariants.asMap()).entrySet().stream().forEachOrdered(entry -> {
+            String opcode = entry.getKey();
+            Collection<LeanInstructionVariant> variants = entry.getValue();
+            try {
+                BufferedWriter writer = new BufferedWriter(new FileWriter(opcode + ".lean"));
+                writer.write("def " + opcode + "1 : instruction :=");
+                writer.newLine();
+                writer.write("  definst \"" + opcode + "\" $ do");
+                writer.newLine();
+
+                writer.write(variants.stream()
+                        .filter(variant -> variants.stream().noneMatch(variant::isConcreteVariantOf))
+                        .filter(variant -> variant.operands.stream().noneMatch(operand ->
+                                operand instanceof KItem && skipRegister.contains(((KLabelConstant) ((KItem) operand).kLabel()).label())
+                                        || operand instanceof UninterpretedToken && operand.sort().name().equals("HexConstant")))
+                        .map(LeanInstructionVariant::toString)
+                        .sorted()
+                        .collect(Collectors.joining(";\n")));
+                writer.newLine();
+                writer.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            variants.forEach(variant -> variant.operands.stream()
+                    .filter(operand -> !(operand instanceof Variable))
+                    .forEach(operand -> {
+                        System.err.println("warning: non-variable operand: " + operand);
+                    }));
+        });
+    }
+
+    enum Register {
+        AH,
+        BH,
+        CH,
+        DH,
+        AL,
+        BL,
+        CL,
+        DL,
+        SIL,
+        DIL,
+        SPL,
+        BPL,
+        R8B,
+        R9B,
+        R10B,
+        R11B,
+        R12B,
+        R13B,
+        R14B,
+        R15B,
+        AX,
+        BX,
+        CX,
+        DX,
+        SI,
+        DI,
+        SP,
+        BP,
+        R8W,
+        R9W,
+        R10W,
+        R11W,
+        R12W,
+        R13W,
+        R14W,
+        R15W,
+        EAX,
+        EBX,
+        ECX,
+        EDX,
+        ESI,
+        EDI,
+        ESP,
+        EBP,
+        R8D,
+        R9D,
+        R10D,
+        R11D,
+        R12D,
+        R13D,
+        R14D,
+        R15D,
+        RAX,
+        RBX,
+        RCX,
+        RDX,
+        RSI,
+        RDI,
+        RSP,
+        RBP,
+        R8,
+        R9,
+        R10,
+        R11,
+        R12,
+        R13,
+        R14,
+        R15,
+        XMM0,
+        XMM1,
+        XMM2,
+        XMM3,
+        XMM4,
+        XMM5,
+        XMM6,
+        XMM7,
+        XMM8,
+        XMM9,
+        XMM10,
+        XMM11,
+        XMM12,
+        XMM13,
+        XMM14,
+        XMM15,
+        YMM0,
+        YMM1,
+        YMM2,
+        YMM3,
+        YMM4,
+        YMM5,
+        YMM6,
+        YMM7,
+        YMM8,
+        YMM9,
+        YMM10,
+        YMM11,
+        YMM12,
+        YMM13,
+        YMM14,
+        YMM15,
+        CF,
+        DF,
+        PF,
+        AF,
+        ZF,
+        SF,
+        OF,
+    }
+
+    static class LeanInstructionVariant {
+        final public static Map<String, String> klabelLeanTranslation = ImmutableMap.<String, String>builder()
+                // Equality
+                .put("_==K_", "eq")
+                .put("_=/=K_", "neq")
+
+                // Bool
+                .put("notBool_", "")
+                .put("_andBool_", "bit_and")
+                .put("_xorBool_", "bit_xor")
+                .put("_orBool_", "bit_or")
+
+                // MInt
+                .put("addMInt", "add")
+                .put("subMInt", "sub")
+                .put("mulMInt", "mul")
+                .put("sdivMInt", "sdiv")
+                .put("sremMInt", "srem")
+                .put("udivMInt", "udiv")
+                .put("uremMInt", "urem")
+                .put("leanShl", "shl")
+                .put("leanAshr", "ashr")
+                .put("leanLshr", "lshr")
+                .put("rol", "rol")
+                .put("ror", "ror")
+                .put("andMInt", "bv_and")
+                .put("orMInt", "bv_or")
+                .put("xorMInt", "bv_xor")
+                .put("sltMInt", "slt")
+                .put("ultMInt", "ult")
+                .put("sleMInt", "sle")
+                .put("uleMInt", "ule")
+                .put("sgtMInt", "sgt")
+                .put("ugtMInt", "ugt")
+                .put("sgeMInt", "sge")
+                .put("ugeMInt", "uge")
+                .put("eqMInt", "eq")
+                .put("neMInt", "neq")
+                .put("concatenateMInt", "concat")
+                .put("extractMInt", "extract")
+                .put("leanSignExtend", "sext")
+                .put("leanZeroExtend", "uext")
+                .put("isBitSet", "")
+                .put("isBitClear", "")
+                .put("overflowFlag", "")
+                .put("parityFlag", "")
+                .put("zeroFlag", "")
+
+                .put("scanForward", "")
+                .put("scanReverse", "")
+                .put("countOnes", "")
+
+                // Float
+                .put("MInt2Float", "")
+                .put("Float2MInt", "")
+                .put("Int2Float", "")
+                .put("_+Float__FLOAT", "")
+                .put("_-Float__FLOAT", "")
+                .put("_*Float__FLOAT", "")
+                .put("_/Float__FLOAT", "")
+                .put("roundFloat", "")
+                .put("Float2Half", "")
+
+                .put("_(_)_MINT-WRAPPER-SYNTAX", "")
+                .put("_(_,_)_MINT-WRAPPER-SYNTAX", "")
+                .put("_(_,_,_)_MINT-WRAPPER-SYNTAX", "")
+
+                // Immediate
+                .put("handleImmediateWithSignExtend", "")
+
+                // Register
+                .put("leanGetRegister", "")
+                .put("leanGetFlag", "")
+                .put("leanSetRegister", "")
+
+                // Memory
+                .put("leanLoad", "")
+                .put("leanStore", "")
+                .put("leanEvaluateAddress", "")
+
+                // misc
+                .put("#if_#then_#else_#fi_K-EQUAL", "mux")
+                .put("#ifBool_#then_#else_#fi_MINT-WRAPPER-SYNTAX", "mux")
+                .put("#ifMInt_#then_#else_#fi_MINT-WRAPPER-SYNTAX", "mux")
+
+                .put("undefBool_MINT-WRAPPER-SYNTAX", "undef")
+                .put("undefMInt_MINT-WRAPPER-SYNTAX", "undef")
+                .put("undefMInt16_MINT-WRAPPER-SYNTAX", "undef")
+                .put("undefMInt32_MINT-WRAPPER-SYNTAX", "undef")
+                .put("undefMInt64_MINT-WRAPPER-SYNTAX", "undef")
+
+                .build();
+
+        final private TermContext context;
+
+        final private String opcode;
+        final private ImmutableList<Term> operands;
+        final private Variable registersVariable;
+        final private Variable memoryVariable;
+        final private Term resultRegisters;
+        final private Term resultMemory;
+        final private Variable resultRegistersCacheVariable;
+        final private Variable resultMemoryCacheVariable;
+        final private List<Variable> conditions;
+
+        final private Map<Term, Variable> termCache;
+        final private Map<Variable, Term> variableDefinitions;
+        final private Map<Variable, Variable> canonicalVariableMap = Maps.newHashMap();
+        private StringBuilder stringBuilder;
+
+        public LeanInstructionVariant(
+                TermContext context,
+                String opcode,
+                List<Term> operands,
+                Variable registersVariable,
+                Variable memoryVariable,
+                Term resultRegisters,
+                Term resultMemory,
+                List<Equality> equalities) {
+            this.context = context;
+            this.opcode = opcode;
+            this.operands = ImmutableList.copyOf(operands);
+            this.registersVariable = registersVariable;
+            this.memoryVariable = memoryVariable;
+            this.resultRegisters = resultRegisters;
+            this.resultMemory = resultMemory;
+            termCache = new HashMap<>();
+            variableDefinitions = new LinkedHashMap<>();
+
+            conditions = equalities.stream()
+                    .map(equality -> (Variable) add(equality.toK()))
+                    .collect(Collectors.toList());
+            resultMemoryCacheVariable = (Variable) add(resultMemory);
+            resultRegistersCacheVariable = (Variable) add(resultRegisters);
+        }
+
+        public Term add(Term term) {
+            if (term instanceof KItem) {
+                if (term.isGround()) {
+                    return term;
+                }
+
+                Term canonicalTerm = KItem.of(
+                        ((KItem) term).kLabel(),
+                        KList.concatenate(
+                                ((KList) ((KItem) term).kList()).getContents().stream()
+                                        .map(this::add)
+                                        .collect(Collectors.toList())),
+                        context.global());
+
+                if (!klabelLeanTranslation.containsKey(((KLabelConstant) ((KItem) term).kLabel()).label())
+                        && !isRegisterTerm(term)) {
+                    System.err.println("Missing Lean translation: " + ((KItem) term).kLabel());
+                }
+
+                Variable variable = termCache.get(canonicalTerm);
+                if (variable == null) {
+                    variable = Variable.getAnonVariable(term.sort());
+                    variableDefinitions.put(variable, canonicalTerm);
+                    termCache.put(canonicalTerm, variable);
+                }
+                return variable;
+            } else if (term instanceof Variable) {
+                Variable variable = (Variable) term;
+                termCache.put(variable, variable);
+                return variable;
+            } else if (term instanceof Token) {
+                return term;
+            } else {
+                assert false: "unexpected term: " + term;
+                return null;
+            }
+        }
+
+        private List<Term> unapplyKLabel(Term subject, String label) {
+            KLabelConstant kLabelConstant = KLabelConstant.of(
+                    KORE.KLabel(label),
+                    context.definition());
+
+            List<Integer> arities = kLabelConstant.signatures().stream()
+                    .map(s -> s.parameters().size())
+                    .distinct()
+                    .collect(Collectors.toList());
+            if (arities.size() != 1) {
+                return null;
+            }
+            int arity = arities.get(0);
+
+            if (subject instanceof KItem
+                    && ((KItem) subject).kLabel().equals(kLabelConstant)
+                    && ((KItem) subject).kList() instanceof KList
+                    && ((KList) ((KItem) subject).kList()).isConcreteCollection()
+                    && ((KList) ((KItem) subject).kList()).concreteSize() == arity) {
+                return ((KList) ((KItem) subject).kList()).getContents();
+            } else {
+                return null;
+            }
+        }
+
+        public static boolean isRegisterTerm(Term term) {
+            return asRegisterName(term) != null;
+        }
+
+        public static String asRegisterName(Term term) {
+            if (term instanceof KItem) {
+                String label = ((KLabelConstant) ((KItem) term).kLabel()).label();
+                if (label.startsWith("%") && label.endsWith("_X86-SYNTAX")) {
+                    return Enums.getIfPresent(Register.class, label.substring("%".length(), label.length() - "_X86-SYNTAX".length()).toUpperCase())
+                            .transform(Object::toString)
+                            .transform(String::toLowerCase)
+                            .orNull();
+                }
+            }
+            return null;
+        }
+
+        final public static Set<String> monadicLabels = ImmutableSet.of(
+                "leanGetRegister",
+                "leanGetFlag",
+                "leanSetRegister",
+                "leanLoad",
+                "leanStore",
+                "leanEvaluateAddress");
+
+        private void addCanonicalVariable(Variable variable, String namePrefix) {
+            canonicalVariableMap.put(
+                    variable,
+                    new Variable(namePrefix + "_" + canonicalVariableMap.size(), variable.sort()));
+        }
+
+        public String toString() {
+            Map<Boolean, Map<Variable, Term>> partitionMap = variableDefinitions.entrySet().stream()
+                    .collect(Collectors.partitioningBy(
+                            entry -> monadicLabels.stream().noneMatch(label -> unapplyKLabel(entry.getValue(), label) != null)
+                                && 1 == variableDefinitions.values().stream().filter(term -> term.variableSet().contains(entry.getKey())).count(),
+                            Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (x, y) -> y, LinkedHashMap::new)));
+            Map<Variable, Term> inlineBindings = partitionMap.getOrDefault(true, Collections.emptyMap());
+            Map<Variable, Term> leanBindings = partitionMap.getOrDefault(false, Collections.emptyMap()).entrySet().stream()
+                    .collect(Collectors.toMap(
+                            Map.Entry::getKey,
+                            entry -> {
+                                Term term = entry.getValue();
+                                Term previousTerm;
+                                do  {
+                                    previousTerm = term;
+                                    term = term.substitute(inlineBindings);
+                                } while (term != previousTerm);
+                                return term;
+                            },
+                            (x, y) -> y,
+                            LinkedHashMap::new));
+
+            operands.stream()
+                    .filter(Variable.class::isInstance)
+                    .map(Variable.class::cast)
+                    .forEachOrdered(variable -> addCanonicalVariable(variable, variable.sort().name().toLowerCase()));
+            leanBindings.keySet().stream().forEachOrdered(variable -> addCanonicalVariable(variable, "v"));
+
+            stringBuilder = new StringBuilder();
+            stringBuilder.append("    pattern fun");
+            for (Term term : operands) {
+                stringBuilder.append(' ');
+                if (term instanceof Variable) {
+                    stringBuilder.append("(");
+                    appendTerm(term);
+                    stringBuilder.append(" : ");
+                    switch (term.sort().name()) {
+                    case "R8":
+                        stringBuilder.append("reg (bv 8)");
+                        break;
+                    case "R16":
+                        stringBuilder.append("reg (bv 16)");
+                        break;
+                    case "R32":
+                        stringBuilder.append("reg (bv 32)");
+                        break;
+                    case "Rh":
+                        stringBuilder.append("reg (bv 8)");
+                        break;
+                    case "R64":
+                        stringBuilder.append("reg (bv 64)");
+                        break;
+                    case "Xmm":
+                        stringBuilder.append("reg (bv 128)");
+                        break;
+                    case "Ymm":
+                        stringBuilder.append("reg (bv 256)");
+                        break;
+                    case "Mem":
+                        stringBuilder.append("Mem");
+                        break;
+                    case "Imm":
+                        stringBuilder.append("imm int");
+                        break;
+                    default:
+                        stringBuilder.append(term.sort());
+                        System.err.println("warning: operand sort: " + term.sort());
+                        break;
+                    }
+                    stringBuilder.append(")");
+                } else if (isRegisterTerm(term)) {
+                    stringBuilder.append("(_ : ").append(asRegisterName(term)).append("Reg)");
+                } else {
+                    stringBuilder.append("[error: operand ").append(term).append("]");
+                }
+            }
+            stringBuilder.append(" => do");
+
+            Variable currentRegistersVariable = registersVariable;
+            Variable currentMemoryVariable = memoryVariable;
+            for (Map.Entry<Variable, Term> entry : leanBindings.entrySet()) {
+                List<Term> leanGetRegisterOrFlagChildren = unapplyKLabel(entry.getValue(), "leanGetRegister");
+                if (leanGetRegisterOrFlagChildren == null) {
+                    leanGetRegisterOrFlagChildren = unapplyKLabel(entry.getValue(), "leanGetFlag");
+                }
+                if (leanGetRegisterOrFlagChildren != null) {
+                    if (leanGetRegisterOrFlagChildren.get(1).equals(currentRegistersVariable)) {
+                        stringBuilder.append("\n      ");
+                        appendTerm(entry.getKey());
+                        stringBuilder.append(" <- getRegister ");
+                        appendTerm(leanGetRegisterOrFlagChildren.get(0));
+                        stringBuilder.append(";");
+                    } else {
+                        System.err.println("error: leanGetRegister: " + opcode);
+                    }
+                    continue;
+                }
+                List<Term> leanSetRegisterChildren = unapplyKLabel(entry.getValue(), "leanSetRegister");
+                if (leanSetRegisterChildren != null) {
+                    if (leanSetRegisterChildren.get(2).equals(currentRegistersVariable)) {
+                        currentRegistersVariable = entry.getKey();
+                        stringBuilder.append("\n      setRegister ");
+                        if (leanSetRegisterChildren.get(0) instanceof Variable) {
+                            stringBuilder.append("(lhs.of_reg ");
+                            appendTerm(leanSetRegisterChildren.get(0));
+                            stringBuilder.append(")");
+                        } else {
+                            appendTerm(leanSetRegisterChildren.get(0));
+                        }
+                        stringBuilder.append(" ");
+                        appendTerm(leanSetRegisterChildren.get(1));
+                        stringBuilder.append(";");
+                    } else {
+                        System.err.println("error: leanSetRegister: " + opcode);
+                    }
+                    continue;
+                }
+
+                List<Term> leanLoadChildren = unapplyKLabel(entry.getValue(), "leanLoad");
+                if (leanLoadChildren != null) {
+                    if (leanLoadChildren.get(2).equals(currentMemoryVariable)) {
+                        stringBuilder.append("\n      ");
+                        appendTerm(entry.getKey());
+                        stringBuilder.append(" <- load ");
+                        appendTerm(leanLoadChildren.get(0));
+                        stringBuilder.append(" ");
+                        appendTerm(leanLoadChildren.get(1));
+                        stringBuilder.append(";");
+                    } else {
+                        System.err.println("error: leanLoad: " + opcode);
+                    }
+                    continue;
+                }
+                List<Term> leanStoreChildren = unapplyKLabel(entry.getValue(), "leanStore");
+                if (leanStoreChildren != null) {
+                    if (leanStoreChildren.get(3).equals(currentMemoryVariable)) {
+                        currentMemoryVariable = entry.getKey();
+                        stringBuilder.append("\n      store ");
+                        appendTerm(leanStoreChildren.get(0));
+                        stringBuilder.append(" ");
+                        appendTerm(leanStoreChildren.get(1));
+                        stringBuilder.append(" ");
+                        appendTerm(leanStoreChildren.get(2));
+                        stringBuilder.append(";");
+                    } else {
+                        System.err.println("error: leanStore: " + opcode);
+                    }
+                    continue;
+                }
+
+                List<Term> leanEvaluateAddressChildren = unapplyKLabel(entry.getValue(), "leanEvaluateAddress");
+                if (leanEvaluateAddressChildren != null) {
+                    if (leanEvaluateAddressChildren.get(1).equals(currentRegistersVariable)) {
+                        stringBuilder.append("\n      ");
+                        appendTerm(entry.getKey());
+                        stringBuilder.append(" <- evaluateAddress ");
+                        appendTerm(leanEvaluateAddressChildren.get(0));
+                        stringBuilder.append(";");
+                    } else {
+                        System.err.println("error: leanEvaluateAddress: " + opcode);
+                    }
+                    continue;
+                }
+
+                stringBuilder.append("\n      ");
+                appendTerm(entry.getKey());
+                stringBuilder.append(" <- eval ");
+                appendTerm(entry.getValue());
+                stringBuilder.append(";");
+            }
+
+            stringBuilder.append("\n      pure ()");
+            stringBuilder.append("\n    pat_end");
+
+            if (!currentRegistersVariable.equals(resultRegistersCacheVariable)) {
+                System.err.println("error: registers variable: " + opcode);
+            }
+            if (!currentMemoryVariable.equals(resultMemoryCacheVariable)) {
+                System.err.println("error: memory variable: " + opcode);
+            }
+
+            if (!conditions.isEmpty()) {
+//                stringBuilder.append("\n  when ");
+//                stringBuilder.append(conditions);
+                System.err.println("error: condition: " + opcode);
+            }
+            return stringBuilder.toString();
+        }
+
+        private void appendTerm(Term term) {
+            if (term instanceof KItem) {
+                String label = ((KLabelConstant) ((KItem) term).kLabel()).label();
+                if (isRegisterTerm(term)) {
+                    stringBuilder.append(label, "%".length(), label.length() - "_X86-SYNTAX".length());
+                } else {
+                    String leanLabel = klabelLeanTranslation.get(label);
+                    if (leanLabel == null || leanLabel.isEmpty()) {
+                        leanLabel = label;
+                    }
+                    List<Term> children = ((KList) ((KItem) term).kList()).getContents();
+                    if (children.isEmpty()) {
+                        stringBuilder.append(leanLabel);
+                    } else {
+                        stringBuilder.append("(");
+                        stringBuilder.append(leanLabel);
+                        for (Term child : children) {
+                            stringBuilder.append(" ");
+                            appendTerm(child);
+                        }
+                        stringBuilder.append(")");
+                    }
+                }
+            } else if (term instanceof Variable) {
+                stringBuilder.append(canonicalVariableMap.get(term).name());
+            } else if (term instanceof BoolToken) {
+                if (((BoolToken) term).booleanValue()) {
+                    stringBuilder.append("bit_one");
+                } else {
+                    stringBuilder.append("bit_zero");
+                }
+            } else if (term instanceof IntToken) {
+                stringBuilder.append(((IntToken) term).bigIntegerValue());
+            } else if (term instanceof BitVector) {
+                stringBuilder.append("(expression.bv_nat ");
+                stringBuilder.append(((BitVector) term).bitwidth());
+                stringBuilder.append(" ");
+                stringBuilder.append(((BitVector) term).unsignedValue());
+                stringBuilder.append(")");
+            } else if (term instanceof UninterpretedToken) {
+                stringBuilder.append(((UninterpretedToken) term).javaBackendValue());
+            } else if (term instanceof FloatToken) {
+                stringBuilder.append(((FloatToken) term).bigFloatValue());
+            } else if (term instanceof StringToken) {
+                stringBuilder.append(((StringToken) term).stringValue().toLowerCase());
+            } else {
+                assert false: "unexpected " + term.getClass() + " term: " + term;
+            }
+        }
+
+        public boolean isConcreteVariantOf(LeanInstructionVariant variant) {
+            if (this == variant) {
+                return false;
+            }
+
+            if (operands.size() != variant.operands.size()) {
+                return false;
+            }
+
+            Map<Variable, Term> substitution = IntStream.range(0, operands.size()).boxed()
+                    .collect(Collectors.toMap(variant.operands::get, operands::get)).entrySet().stream()
+                    .filter(entry -> !entry.getKey().equals(entry.getValue()))
+                    .filter(entry ->
+                            !(entry.getKey().sort().name().equals("R8") && entry.getValue().sort().name().equals("Rh")))
+                    .filter(entry -> entry.getKey() instanceof Variable)
+                    .collect(Collectors.toMap(entry -> (Variable) entry.getKey(), Map.Entry::getValue));
+            if (variant.operands.stream().filter(Variable.class::isInstance).count() != substitution.size()) {
+                return false;
+            }
+
+            return variant.resultRegisters.substitute(substitution).equals(resultRegisters)
+                    && variant.resultMemory.substitute(substitution).equals(resultMemory);
+        }
     }
 
     /**

@@ -622,31 +622,32 @@ public class KItem extends Term implements KItemRepresentation {
 
         private boolean owiseApplicable(KItem kItem, TermContext context, Collection<Rule> rulesForKLabel) {
             if (!kItem.isGround()) {
-                if (context.global().stage != Stage.REWRITING) {
-                    return false;
-                }
-
-                /*
-                 * apply the "[owise]" rule only if this kItem does not unify with any
-                 * of the left-hand-sides of the other rules (no other rule may apply)
-                 */
-                for (Rule rule : rulesForKLabel) {
-                    if (rule.att().contains("owise")) {
-                        continue;
-                    }
-
-                    ConstrainedTerm subject = new ConstrainedTerm(kItem.kList(), context);
-                    ConstrainedTerm pattern = new ConstrainedTerm(
-                            ((KItem) rule.leftHandSide()).kList(),
-                            ConjunctiveFormula.of(context.global())
-                                    .add(rule.lookups())
-                                    .addAll(rule.requires()),
-                            context);
-                    if (!subject.unify(pattern, null,
-                            new FormulaContext(FormulaContext.Kind.OwiseRule, rule, context.global())).isEmpty()) {
-                        return false;
-                    }
-                }
+//                if (context.global().stage != Stage.REWRITING) {
+//                    return false;
+//                }
+//
+//                /*
+//                 * apply the "[owise]" rule only if this kItem does not unify with any
+//                 * of the left-hand-sides of the other rules (no other rule may apply)
+//                 */
+//                for (Rule rule : rulesForKLabel) {
+//                    if (rule.att().contains("owise")) {
+//                        continue;
+//                    }
+//
+//                    ConstrainedTerm subject = new ConstrainedTerm(kItem.kList(), context);
+//                    ConstrainedTerm pattern = new ConstrainedTerm(
+//                            ((KItem) rule.leftHandSide()).kList(),
+//                            ConjunctiveFormula.of(context.global())
+//                                    .add(rule.lookups())
+//                                    .addAll(rule.requires()),
+//                            context);
+//                    if (!subject.unify(pattern, null,
+//                            new FormulaContext(FormulaContext.Kind.OwiseRule, rule, context.global())).isEmpty()) {
+//                        return false;
+//                    }
+//                }
+                return false;
             }
             return true;
         }
