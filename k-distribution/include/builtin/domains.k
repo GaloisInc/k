@@ -673,6 +673,8 @@ module BYTES-HOOKED [concrete]
   syntax String ::= Bytes2String(Bytes) [function, functional, hook(BYTES.bytes2string)]
   syntax Bytes ::= String2Bytes(String) [function, functional, hook(BYTES.string2bytes)]
 
+  syntax Bytes ::= Bytes "[" Int "<-" Int "]" [function, hook(BYTES.update)]
+  syntax Int ::= Bytes "[" Int "]" [function, hook(BYTES.get)]
   syntax Bytes ::= substrBytes(Bytes, Int, Int) [function, hook(BYTES.substr)]
   syntax Bytes ::= replaceAtBytes(Bytes, Int, Bytes) [function, hook(BYTES.replaceAt)]
   syntax Bytes ::= padRightBytes(Bytes, Int, Int) [function, hook(BYTES.padRight)]
@@ -724,6 +726,13 @@ module BYTES-IN-K [symbolic]
   syntax Bytes ::= String2Bytes(String) [function, functional]
   rule String2Bytes(S) => ordChar(substrString(S, 0, 1)) : String2Bytes(substrString(S, 1, lengthString(S))) requires lengthString(S) >=Int 1
   rule String2Bytes("") => nilBytes
+
+  syntax Bytes ::= Bytes "[" Int "<-" Int "]" [function]
+  rule BS [ N <- M ] => substrBytes(BS, 0, N) +Bytes M : substrBytes(BS, N +Int 1, lengthBytes(BS))
+
+  syntax Int ::= Bytes "[" Int "]" [function]
+  rule (B : BS) [ 0 ] => B
+  rule (_ : BS) [ I ] => BS [ I -Int 1] requires I >Int 0
 
   syntax Bytes ::= substrBytes(Bytes, Int, Int) [function]
   rule substrBytes(BS, 0, 0) => nilBytes
@@ -954,6 +963,7 @@ module K-IO
                | "#open" "(" String "," String ")" [function, hook(IO.open), impure]
                | "#tell" "(" Int ")" [function, hook(IO.tell), impure]
                | "#getc" "(" Int ")"             [function, hook(IO.getc), impure]
+               | "#accept" "(" Int ")" [function, hook(IO.accept), impure]
   syntax IOString ::= "#read" "(" Int "," Int ")"    [function, hook(IO.read), impure]
 
   syntax K ::= "#close" "(" Int ")" [function, hook(IO.close), impure]
@@ -963,6 +973,7 @@ module K-IO
              | "#write" "(" Int "," String ")" [function, hook(IO.write), impure]
              | "#lock" "(" Int "," Int ")" [function, hook(IO.lock), impure]
              | "#unlock" "(" Int "," Int ")" [function, hook(IO.unlock), impure]
+             | "#shutdownWrite" "(" Int ")" [function, hook(IO.shutdownWrite), impure]
 
   syntax KItem ::= "#stat" "(" String ")" [function, hook(IO.stat), impure]
                  | "#lstat" "(" String ")" [function, hook(IO.lstat), impure]
@@ -986,7 +997,7 @@ module K-IO
   // executes the given command line with `sh -c cmd:String` on unix or
   // `cmd /c cmd:String` on windows and returns #systemResult
   syntax KItem ::= #system ( String ) [function, hook(IO.system), impure]
-                 | "#systemResult" "(" Int /* exit code */ "," String /* stdout */ "," String /* stderr */ ")"
+                 | "#systemResult" "(" Int /* exit code */ "," String /* stdout */ "," String /* stderr */ ")" [klabel(#systemResult), symbol]
 
   syntax K ::= #logToFile(String, String) [function, functional, hook(IO.log), impure, returnsUnit]
   // #make safe temp ( prefix:String, suffix:String):IOFile - creates a temporary file in the default system location

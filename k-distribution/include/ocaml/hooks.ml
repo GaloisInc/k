@@ -278,6 +278,8 @@ struct
   let flush_logs () =
     Hashtbl.iter flush_log log_files
 
+  let hook_accept _ _ _ _ _ = raise Not_implemented
+  let hook_shutdownWrite _ _ _ _ _ = raise Not_implemented
   let hook_stat _ _ _ _ _ = raise Not_implemented
   let hook_lstat _ _ _ _ _ = raise Not_implemented
   let hook_opendir _ _ _ _ _ = raise Not_implemented
@@ -299,7 +301,7 @@ struct
         | Unix.WSIGNALED n -> (128 + n)
         | Unix.WSTOPPED n -> (128 + n)
       in
-      [KApply3((parse_klabel "#systemResult(_,_,_)_K-IO"), [Int (Z.of_int exit_code)], [String (Buffer.contents buf_out)], [String (Buffer.contents buf_err)])]
+      [KApply3((parse_klabel "#systemResult"), [Int (Z.of_int exit_code)], [String (Buffer.contents buf_out)], [String (Buffer.contents buf_err)])]
     | _ -> raise Not_implemented
   let hook_mkstemp c _ _ _ _ = match c with
     | [String prefix], [String suffix] -> unix_error (fun () ->
@@ -380,6 +382,15 @@ struct
     | _ -> raise Not_implemented
   let hook_string2bytes c _ _ _ _ = match c with
       [String s] -> [Bytes (Bytes.of_string s)]
+    | _ -> raise Not_implemented
+  let hook_get c _ _ _ _ = match c with
+      [Bytes b], [Int off] ->
+      [Int (Z.of_int (Char.code (Bytes.get b (Z.to_int off))))]
+    | _ -> raise Not_implemented
+  let hook_update c _ _ _ _ = match c with
+      [Bytes b], [Int off], [Int v] ->
+      Bytes.set b (Z.to_int off) (Char.chr (Z.to_int v));
+      [Bytes b]
     | _ -> raise Not_implemented
   let hook_substr c _ _ _ _ = match c with
       [Bytes b], [Int off1], [Int off2] ->
