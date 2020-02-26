@@ -70,6 +70,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -886,37 +887,57 @@ public class SymbolicRewriter {
             "%eax_X86-SYNTAX",
             "%rax_X86-SYNTAX",
             "%xmm0_X86-SYNTAX");
-
+    
     private void printLean() {
         ImmutableSortedMap.copyOf(leanInstructionVariants.asMap()).entrySet().stream().forEachOrdered(entry -> {
             String opcode = entry.getKey();
             Collection<LeanInstructionVariant> variants = entry.getValue();
             try {
                 BufferedWriter writer = new BufferedWriter(new FileWriter(opcode + ".lean"));
-                writer.write("def " + opcode + "1 : instruction :=");
+                writer.write("def " + opcode + " : instruction :=");
                 writer.newLine();
                 writer.write("  definst \"" + opcode + "\" $ do");
                 writer.newLine();
 
-                writer.write(variants.stream()
-                        .filter(variant -> variants.stream().noneMatch(variant::isConcreteVariantOf))
-                        .filter(variant -> variant.operands.stream().noneMatch(operand ->
-                                operand instanceof KItem && skipRegister.contains(((KLabelConstant) ((KItem) operand).kLabel()).label())
-                                        || operand instanceof UninterpretedToken && operand.sort().name().equals("HexConstant")))
-                        .map(LeanInstructionVariant::toString)
-                        .sorted()
-                        .collect(Collectors.joining(";\n")));
+                Stream <LeanInstructionVariant> filteredVariants = 
+                    variants.stream()
+                    .filter(variant -> variants.stream().noneMatch(variant::isConcreteVariantOf))
+                    .filter(variant -> variant.operands.stream().noneMatch(operand ->
+                               operand instanceof KItem && skipRegister.contains(((KLabelConstant) ((KItem) operand).kLabel()).label())
+                            || operand instanceof UninterpretedToken && operand.sort().name().equals("HexConstant")));
+
+                
+                writer.write(filteredVariants.map(LeanInstructionVariant::toString)
+                                             .sorted()
+                                             .collect(Collectors.joining(";\n")));
                 writer.newLine();
                 writer.close();
+
+
+                long filteredVariantsCount = 
+                    variants.stream()
+                    .filter(variant -> variants.stream().noneMatch(variant::isConcreteVariantOf))
+                    .filter(variant -> variant.operands.stream().noneMatch(operand ->
+                               operand instanceof KItem && skipRegister.contains(((KLabelConstant) ((KItem) operand).kLabel()).label())
+                            || operand instanceof UninterpretedToken && operand.sort().name().equals("HexConstant")))
+                    .count();
+                
+                if (variants.size() != filteredVariantsCount) {
+                    System.err.println("warning: " + opcode + ": filtered out " + Long.toString(variants.size() - filteredVariantsCount)
+                                       + " variants");
+                }
+
+                variants.forEach(variant -> variant.operands.stream()
+                                 .filter(operand -> !(operand instanceof Variable))
+                                 .forEach(operand -> {
+                                         System.err.println("warning: " + opcode + ": non-variable operand: " + operand);
+                                     }));
+                
             } catch (IOException e) {
                 e.printStackTrace();
+            } catch (NullPointerException e) {
+                System.err.println("NULL POINTER DEREFERENCE while processing instruction " + opcode);
             }
-
-            variants.forEach(variant -> variant.operands.stream()
-                    .filter(operand -> !(operand instanceof Variable))
-                    .forEach(operand -> {
-                        System.err.println("warning: non-variable operand: " + operand);
-                    }));
         });
     }
 
@@ -1069,7 +1090,8 @@ public class SymbolicRewriter {
                 .put("eqMInt", "eq")
                 .put("neMInt", "neq")
                 .put("concatenateMInt", "concat")
-                .put("extractMInt", "extract")
+            //  .put("extractMInt", "extract")
+                .put("extractMInt", "")
                 .put("leanSignExtend", "sext")
                 .put("leanZeroExtend", "uext")
                 .put("isBitSet", "")
@@ -1083,19 +1105,20 @@ public class SymbolicRewriter {
                 .put("countOnes", "")
 
                 // Float
-                .put("MInt2Float", "")
-                .put("Float2MInt", "")
+                .put("MInt2Float", "") // handled below
+                .put("Float2MInt", "fp_bitcast_to_bv")
                 .put("Int2Float", "")
-                .put("_+Float__FLOAT", "")
-                .put("_-Float__FLOAT", "")
-                .put("_*Float__FLOAT", "")
-                .put("_/Float__FLOAT", "")
-                .put("roundFloat", "")
+                .put("_+Float__FLOAT", "fp_add")
+                .put("_-Float__FLOAT", "fp_sub")
+                .put("_*Float__FLOAT", "fp_mul")
+                .put("_/Float__FLOAT", "fp_div")
+                .put("roundFloat", "fp_round")
                 .put("Float2Half", "")
 
-                .put("_(_)_MINT-WRAPPER-SYNTAX", "")
-                .put("_(_,_)_MINT-WRAPPER-SYNTAX", "")
-                .put("_(_,_,_)_MINT-WRAPPER-SYNTAX", "")
+                // FIXME: these don't seem to do anything?
+                .put("_(_)_MINT-WRAPPER-SYNTAX", "/- (_) -/")
+                .put("_(_,_)_MINT-WRAPPER-SYNTAX", "/- (_,_) -/ ")
+                .put("_(_,_,_)_MINT-WRAPPER-SYNTAX", "/- (_,_,_) -/")
 
                 // Immediate
                 .put("handleImmediateWithSignExtend", "")
@@ -1199,7 +1222,7 @@ public class SymbolicRewriter {
             } else if (term instanceof Token) {
                 return term;
             } else {
-                assert false: "unexpected term: " + term;
+                assert false: "unexpected term: " + term.sort().name() + "\n\t" + term;
                 return null;
             }
         }
@@ -1252,8 +1275,10 @@ public class SymbolicRewriter {
                 "leanSetRegister",
                 "leanLoad",
                 "leanStore",
-                "leanEvaluateAddress");
-
+                "leanEvaluateAddress",
+                "MInt2Float",
+                "extractMInt" // try to avoid Lean bug
+                                                                        );
         private void addCanonicalVariable(Variable variable, String namePrefix) {
             canonicalVariableMap.put(
                     variable,
@@ -1289,54 +1314,58 @@ public class SymbolicRewriter {
             leanBindings.keySet().stream().forEachOrdered(variable -> addCanonicalVariable(variable, "v"));
 
             stringBuilder = new StringBuilder();
-            stringBuilder.append("    pattern fun");
-            for (Term term : operands) {
-                stringBuilder.append(' ');
-                if (term instanceof Variable) {
-                    stringBuilder.append("(");
-                    appendTerm(term);
-                    stringBuilder.append(" : ");
-                    switch (term.sort().name()) {
-                    case "R8":
-                        stringBuilder.append("reg (bv 8)");
-                        break;
-                    case "R16":
-                        stringBuilder.append("reg (bv 16)");
-                        break;
-                    case "R32":
-                        stringBuilder.append("reg (bv 32)");
-                        break;
-                    case "Rh":
-                        stringBuilder.append("reg (bv 8)");
-                        break;
-                    case "R64":
-                        stringBuilder.append("reg (bv 64)");
-                        break;
-                    case "Xmm":
-                        stringBuilder.append("reg (bv 128)");
-                        break;
-                    case "Ymm":
-                        stringBuilder.append("reg (bv 256)");
-                        break;
-                    case "Mem":
-                        stringBuilder.append("Mem");
-                        break;
-                    case "Imm":
-                        stringBuilder.append("imm int");
-                        break;
-                    default:
-                        stringBuilder.append(term.sort());
-                        System.err.println("warning: operand sort: " + term.sort());
-                        break;
+            if (operands.isEmpty()) {
+                stringBuilder.append("    pattern do");                
+            } else {
+                stringBuilder.append("    pattern fun");
+                for (Term term : operands) {
+                    stringBuilder.append(' ');
+                    if (term instanceof Variable) {
+                        stringBuilder.append("(");
+                        appendTerm(term);
+                        stringBuilder.append(" : ");
+                        switch (term.sort().name()) {
+                        case "R8":
+                            stringBuilder.append("reg (bv 8)");
+                            break;
+                        case "R16":
+                            stringBuilder.append("reg (bv 16)");
+                            break;
+                        case "R32":
+                            stringBuilder.append("reg (bv 32)");
+                            break;
+                        case "Rh":
+                            stringBuilder.append("reg (bv 8)");
+                            break;
+                        case "R64":
+                            stringBuilder.append("reg (bv 64)");
+                            break;
+                        case "Xmm":
+                            stringBuilder.append("reg (bv 128)");
+                            break;
+                        case "Ymm":
+                            stringBuilder.append("reg (bv 256)");
+                            break;
+                        case "Mem":
+                            stringBuilder.append("Mem");
+                            break;
+                        case "Imm":
+                            stringBuilder.append("imm int");
+                            break;
+                        default:
+                            stringBuilder.append(term.sort());
+                            System.err.println("warning: operand sort: " + term.sort());
+                            break;
+                        }
+                        stringBuilder.append(")");
+                    } else if (isRegisterTerm(term)) {
+                        stringBuilder.append("(_ : ").append(asRegisterName(term)).append("Reg)");
+                    } else {
+                        stringBuilder.append("[error: operand ").append(term).append("]");
                     }
-                    stringBuilder.append(")");
-                } else if (isRegisterTerm(term)) {
-                    stringBuilder.append("(_ : ").append(asRegisterName(term)).append("Reg)");
-                } else {
-                    stringBuilder.append("[error: operand ").append(term).append("]");
                 }
+                stringBuilder.append(" => do");
             }
-            stringBuilder.append(" => do");
 
             Variable currentRegistersVariable = registersVariable;
             Variable currentMemoryVariable = memoryVariable;
@@ -1350,7 +1379,13 @@ public class SymbolicRewriter {
                         stringBuilder.append("\n      ");
                         appendTerm(entry.getKey());
                         stringBuilder.append(" <- getRegister ");
-                        appendTerm(leanGetRegisterOrFlagChildren.get(0));
+                        if (leanGetRegisterOrFlagChildren.get(0) instanceof Variable) {
+                            stringBuilder.append("(lhs.of_reg ");
+                            appendTerm(leanGetRegisterOrFlagChildren.get(0));
+                            stringBuilder.append(")");
+                        } else {
+                            appendTerm(leanGetRegisterOrFlagChildren.get(0));
+                        }
                         stringBuilder.append(";");
                     } else {
                         System.err.println("error: leanGetRegister: " + opcode);
@@ -1424,6 +1459,68 @@ public class SymbolicRewriter {
                     continue;
                 }
 
+                // MInt2Float bv mbits ebits
+                // We support 53/11, 24/8, 11/5 anything else is an error.
+                // This is required as converting to a FP is partial (e.g. if the K wants a 10 bit float)
+                List<Term> mint2FloatChildren = unapplyKLabel(entry.getValue(), "MInt2Float");
+                if (mint2FloatChildren != null) {
+                    Term mbitsT = mint2FloatChildren.get(1);
+                    Term ebitsT = mint2FloatChildren.get(2);
+                    
+                    if (mbitsT instanceof IntToken && ebitsT instanceof IntToken) {
+                        int mbits = ((IntToken) mbitsT).intValue();
+                        int ebits = ((IntToken) ebitsT).intValue();
+                        
+                        stringBuilder.append("\n      ");
+                        appendTerm(entry.getKey());                        
+                        stringBuilder.append(" <- eval (bv_bitcast_to_fp");
+                        if (mbits == 11 && ebits == 5) {
+                            stringBuilder.append(" float_class.fp16 ");
+                        } else if (mbits == 24 && ebits == 8) {
+                            stringBuilder.append(" float_class.fp32 ");
+                        } else if (mbits == 53 && ebits == 11) {
+                            stringBuilder.append(" float_class.fp64 ");
+                        } else {
+                            System.err.println("error: Bad exponent/mantissa for MInt2Float: " + mbits + " and " + ebits);
+                        }
+                        appendTerm(mint2FloatChildren.get(0));
+                        stringBuilder.append(");");
+                    } else {
+                        System.err.println("error: Non-constant exponent/mantissa for MInt2Float: " + mbitsT + " and " + ebitsT);
+                    }
+                    continue;
+                }
+
+                // extractMInt e l h
+                // This gets around a lean bug, where we have to explicitly add type annotations
+                List<Term> extractMIntChildren = unapplyKLabel(entry.getValue(), "extractMInt");
+                if (extractMIntChildren != null) {
+                    Term lowerT = extractMIntChildren.get(1);
+                    Term upperT = extractMIntChildren.get(2);
+
+                    stringBuilder.append("\n      ");
+                    if (lowerT instanceof IntToken && upperT instanceof IntToken) {
+                        int lower = ((IntToken) lowerT).intValue();
+                        int upper = ((IntToken) upperT).intValue();
+
+                        stringBuilder.append("(");                        
+                        appendTerm(entry.getKey());                                                
+                        stringBuilder.append(" : expression (bv " + (upper - lower) + "))");
+                    } else {
+                        appendTerm(entry.getKey());                                                                        
+                        System.err.println("warning: Non-constant lower/upper bounds for extractMInt: " + lowerT + " and " + upperT);
+                    }
+                    stringBuilder.append(" <- eval (extract ");
+                    appendTerm(extractMIntChildren.get(0));
+                    stringBuilder.append(" ");
+                    appendTerm(extractMIntChildren.get(1));
+                    stringBuilder.append(" ");
+                    appendTerm(extractMIntChildren.get(2));
+                    stringBuilder.append(");");
+                    
+                    continue;
+                }
+                
                 stringBuilder.append("\n      ");
                 appendTerm(entry.getKey());
                 stringBuilder.append(" <- eval ");
@@ -1473,6 +1570,9 @@ public class SymbolicRewriter {
                     }
                 }
             } else if (term instanceof Variable) {
+                if (canonicalVariableMap.get(term) == null) {
+                    System.err.println("\nSaw a NULL term " + ((Variable) term).name());
+                }
                 stringBuilder.append(canonicalVariableMap.get(term).name());
             } else if (term instanceof BoolToken) {
                 if (((BoolToken) term).booleanValue()) {
