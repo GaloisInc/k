@@ -1089,8 +1089,10 @@ public class SymbolicRewriter {
                 .put("ugeMInt", "uge")
                 .put("eqMInt", "eq")
                 .put("neMInt", "neq")
-                .put("concatenateMInt", "concat")
+            // These (currently) cause issues.
+            //  .put("concatenateMInt", "concat")            
             //  .put("extractMInt", "extract")
+                .put("concatenateMInt", "")            
                 .put("extractMInt", "")
                 .put("leanSignExtend", "sext")
                 .put("leanZeroExtend", "uext")
@@ -1277,8 +1279,8 @@ public class SymbolicRewriter {
                 "leanStore",
                 "leanEvaluateAddress",
                 "MInt2Float",
-                "extractMInt" // try to avoid Lean bug
-                                                                        );
+                "extractMInt", // try to avoid Lean bug 
+                "concatenateMInt");
         private void addCanonicalVariable(Variable variable, String namePrefix) {
             canonicalVariableMap.put(
                     variable,
@@ -1315,9 +1317,9 @@ public class SymbolicRewriter {
 
             stringBuilder = new StringBuilder();
             if (operands.isEmpty()) {
-                stringBuilder.append("    pattern do");                
+                stringBuilder.append("    instr_pat $");
             } else {
-                stringBuilder.append("    pattern fun");
+                stringBuilder.append("    instr_pat $ fun");
                 for (Term term : operands) {
                     stringBuilder.append(' ');
                     if (term instanceof Variable) {
@@ -1364,9 +1366,11 @@ public class SymbolicRewriter {
                         stringBuilder.append("[error: operand ").append(term).append("]");
                     }
                 }
-                stringBuilder.append(" => do");
+                stringBuilder.append(" =>");
             }
-
+            stringBuilder.append("\n     let action : semantics Unit := do");
+            
+            
             Variable currentRegistersVariable = registersVariable;
             Variable currentMemoryVariable = memoryVariable;
             for (Map.Entry<Variable, Term> entry : leanBindings.entrySet()) {
@@ -1376,7 +1380,7 @@ public class SymbolicRewriter {
                 }
                 if (leanGetRegisterOrFlagChildren != null) {
                     if (leanGetRegisterOrFlagChildren.get(1).equals(currentRegistersVariable)) {
-                        stringBuilder.append("\n      ");
+                        stringBuilder.append("\n      let ");
                         appendTerm(entry.getKey());
                         stringBuilder.append(" <- getRegister ");
                         if (leanGetRegisterOrFlagChildren.get(0) instanceof Variable) {
@@ -1416,7 +1420,7 @@ public class SymbolicRewriter {
                 List<Term> leanLoadChildren = unapplyKLabel(entry.getValue(), "leanLoad");
                 if (leanLoadChildren != null) {
                     if (leanLoadChildren.get(2).equals(currentMemoryVariable)) {
-                        stringBuilder.append("\n      ");
+                        stringBuilder.append("\n      let ");
                         appendTerm(entry.getKey());
                         stringBuilder.append(" <- load ");
                         appendTerm(leanLoadChildren.get(0));
@@ -1448,7 +1452,7 @@ public class SymbolicRewriter {
                 List<Term> leanEvaluateAddressChildren = unapplyKLabel(entry.getValue(), "leanEvaluateAddress");
                 if (leanEvaluateAddressChildren != null) {
                     if (leanEvaluateAddressChildren.get(1).equals(currentRegistersVariable)) {
-                        stringBuilder.append("\n      ");
+                        stringBuilder.append("\n      let ");
                         appendTerm(entry.getKey());
                         stringBuilder.append(" <- evaluateAddress ");
                         appendTerm(leanEvaluateAddressChildren.get(0));
@@ -1471,7 +1475,7 @@ public class SymbolicRewriter {
                         int mbits = ((IntToken) mbitsT).intValue();
                         int ebits = ((IntToken) ebitsT).intValue();
                         
-                        stringBuilder.append("\n      ");
+                        stringBuilder.append("\n      let ");
                         appendTerm(entry.getKey());                        
                         stringBuilder.append(" <- eval (bv_bitcast_to_fp");
                         if (mbits == 11 && ebits == 5) {
@@ -1498,7 +1502,7 @@ public class SymbolicRewriter {
                     Term lowerT = extractMIntChildren.get(1);
                     Term upperT = extractMIntChildren.get(2);
 
-                    stringBuilder.append("\n      ");
+                    stringBuilder.append("\n      let ");
                     if (lowerT instanceof IntToken && upperT instanceof IntToken) {
                         int lower = ((IntToken) lowerT).intValue();
                         int upper = ((IntToken) upperT).intValue();
@@ -1508,7 +1512,7 @@ public class SymbolicRewriter {
                         stringBuilder.append(" : expression (bv " + (upper - lower) + "))");
                     } else {
                         appendTerm(entry.getKey());                                                                        
-                        System.err.println("warning: Non-constant lower/upper bounds for extractMInt: " + lowerT + " and " + upperT);
+                        System.err.println("warning: " + opcode + ": Non-constant lower/upper bounds for extractMInt: " + lowerT + " and " + upperT);
                     }
                     stringBuilder.append(" <- eval (extract ");
                     appendTerm(extractMIntChildren.get(0));
@@ -1521,7 +1525,35 @@ public class SymbolicRewriter {
                     continue;
                 }
                 
-                stringBuilder.append("\n      ");
+                // concatenateMInt l h
+                // This gets around a lean bug, where we have to explicitly add type annotations
+                List<Term> concatenateMIntChildren = unapplyKLabel(entry.getValue(), "concatenateMInt");
+                if (concatenateMIntChildren != null) {
+                    Term upperT = concatenateMIntChildren.get(0);
+                    Term lowerT = concatenateMIntChildren.get(1);
+
+                    stringBuilder.append("\n      let ");
+                    if (lowerT instanceof IntToken && upperT instanceof IntToken) {
+                        int upper = ((IntToken) upperT).intValue();
+                        int lower = ((IntToken) lowerT).intValue();
+
+                        stringBuilder.append("(");                        
+                        appendTerm(entry.getKey());                                                
+                        stringBuilder.append(" : expression (bv " + (upper + lower) + "))");
+                    } else {
+                        appendTerm(entry.getKey());
+                        System.err.println("warning: " + opcode + ": Non-constant lower/upper bounds for concatenateMInt: " + lowerT + " and " + upperT);
+                    }
+                    stringBuilder.append(" <- eval (concat ");
+                    appendTerm(concatenateMIntChildren.get(0));
+                    stringBuilder.append(" ");
+                    appendTerm(concatenateMIntChildren.get(1));
+                    stringBuilder.append(");");
+                    
+                    continue;
+                }
+                
+                stringBuilder.append("\n      let ");
                 appendTerm(entry.getKey());
                 stringBuilder.append(" <- eval ");
                 appendTerm(entry.getValue());
@@ -1529,8 +1561,9 @@ public class SymbolicRewriter {
             }
 
             stringBuilder.append("\n      pure ()");
-            stringBuilder.append("\n    pat_end");
+            stringBuilder.append("\n     action");
 
+            
             if (!currentRegistersVariable.equals(resultRegistersCacheVariable)) {
                 System.err.println("error: registers variable: " + opcode);
             }
