@@ -1114,7 +1114,7 @@ public class SymbolicRewriter {
                 .put("_-Float__FLOAT", "fp_sub")
                 .put("_*Float__FLOAT", "fp_mul")
                 .put("_/Float__FLOAT", "fp_div")
-                .put("roundFloat", "fp_round")
+                .put("roundFloat", "") // handled below
                 .put("Float2Half", "")
 
                 // FIXME: these don't seem to do anything?
@@ -1279,6 +1279,7 @@ public class SymbolicRewriter {
                 "leanStore",
                 "leanEvaluateAddress",
                 "MInt2Float",
+                "roundFloat",
                 "extractMInt", // try to avoid Lean bug 
                 "concatenateMInt");
         private void addCanonicalVariable(Variable variable, String namePrefix) {
@@ -1494,6 +1495,40 @@ public class SymbolicRewriter {
                     }
                     continue;
                 }
+
+                // FIXME: clag from above
+                // roundFloat v mbits ebits
+                // We support 53/11, 24/8, 11/5 anything else is an error.
+                // This is required as converting to a FP is partial (e.g. if the K wants a 10 bit float)
+                List<Term> roundFloatChildren = unapplyKLabel(entry.getValue(), "roundFloat");
+                if (roundFloatChildren != null) {
+                    Term mbitsT = roundFloatChildren.get(1);
+                    Term ebitsT = roundFloatChildren.get(2);
+                    
+                    if (mbitsT instanceof IntToken && ebitsT instanceof IntToken) {
+                        int mbits = ((IntToken) mbitsT).intValue();
+                        int ebits = ((IntToken) ebitsT).intValue();
+                        
+                        stringBuilder.append("\n      let ");
+                        appendTerm(entry.getKey());                        
+                        stringBuilder.append(" <- eval (fp_round");
+                        if (mbits == 11 && ebits == 5) {
+                            stringBuilder.append(" float_class.fp16 ");
+                        } else if (mbits == 24 && ebits == 8) {
+                            stringBuilder.append(" float_class.fp32 ");
+                        } else if (mbits == 53 && ebits == 11) {
+                            stringBuilder.append(" float_class.fp64 ");
+                        } else {
+                            System.err.println("error: Bad exponent/mantissa for roundFloat: " + mbits + " and " + ebits);
+                        }
+                        appendTerm(roundFloatChildren.get(0));
+                        stringBuilder.append(");");
+                    } else {
+                        System.err.println("error: Non-constant exponent/mantissa for roundFloat: " + mbitsT + " and " + ebitsT);
+                    }
+                    continue;
+                }
+                
 
                 // extractMInt e l h
                 // This gets around a lean bug, where we have to explicitly add type annotations
